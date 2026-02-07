@@ -1,6 +1,5 @@
 // src/routes/PeerPayRoute.tsx
 import React, { useCallback, useEffect, useMemo, useState, useContext } from 'react'
-import { useHistory } from 'react-router'
 import {
   Alert,
   Avatar,
@@ -29,7 +28,7 @@ import {
 } from '@mui/material'
 import InputAdornment from '@mui/material/InputAdornment'
 import { IncomingPayment } from '@bsv/message-box-client'
-import { Utils, WalletClient, Script, PublicKey, WalletInterface } from '@bsv/sdk'
+import { Utils, Script, PublicKey, WalletInterface } from '@bsv/sdk'
 import { WalletContext } from '../../../WalletContext'
 import { toast } from 'react-toastify'
 import { CurrencyConverter } from '@bsv/amountinator'
@@ -45,7 +44,8 @@ type PaymentFormProps = {
   wallet: WalletInterface
 }
 function PaymentForm({ wallet, onSent }: PaymentFormProps) {
-  const {managers, messageBoxUrl, activeProfile, peerPayClient} = useContext(WalletContext)
+  const {managers, activeProfile, peerPayClient, loginType, adminOriginator } = useContext(WalletContext)
+  const isDirectKey = loginType === 'direct-key'
   const [recipient, setRecipient] = useState('')
   const [amount, setAmount] = useState<number>(0)
   const [sending, setSending] = useState(false)
@@ -58,7 +58,7 @@ function PaymentForm({ wallet, onSent }: PaymentFormProps) {
 
   // Identity search hook for "Send to Anyone" tab
   const identitySearch = useIdentitySearch({
-    originator: 'desktop.bsvb.tech',
+    originator: adminOriginator,
     wallet,
     onIdentitySelected: (identity) => {
       if (identity) {
@@ -105,10 +105,11 @@ function PaymentForm({ wallet, onSent }: PaymentFormProps) {
   }, [])
 
   useEffect(() => {
+    if (isDirectKey) return // No profiles in direct-key mode
     let alive = true
       ; (async () => {
         try {
-          if (!managers?.walletManager) return
+          if (!managers?.walletManager || !managers.walletManager.listProfiles) return
           const list: WalletProfile[] = await managers.walletManager.listProfiles()
           if (!alive) return
           const cloned = list.map(p => ({
@@ -124,7 +125,7 @@ function PaymentForm({ wallet, onSent }: PaymentFormProps) {
         }
       })()
     return () => { alive = false }
-  }, [managers])
+  }, [managers, isDirectKey])
 
   const canSend = recipient.trim().length > 0 && amount > 0 && !sending
 
@@ -167,15 +168,17 @@ function PaymentForm({ wallet, onSent }: PaymentFormProps) {
         Create New Payment
       </Typography>
       <Stack spacing={2}>
-        <Tabs value={tabValue} onChange={(e, newValue) => {
-          setTabValue(newValue)
-          setRecipient('')
-        }}>
-          <Tab label="Pay Someone" />
-          <Tab label="Internal Transfer" />
-        </Tabs>
+        {!isDirectKey && (
+          <Tabs value={tabValue} onChange={(e, newValue) => {
+            setTabValue(newValue)
+            setRecipient('')
+          }}>
+            <Tab label="Pay Someone" />
+            <Tab label="Internal Transfer" />
+          </Tabs>
+        )}
 
-        {tabValue === 0 ? (
+        {(tabValue === 0 || isDirectKey) ? (
           <>
             <Autocomplete
               options={identitySearch.identities}
@@ -464,8 +467,17 @@ function PaymentList({ payments, onRefresh }: PaymentListProps) {
 
 /* ------------------------------- Route View -------------------------------- */
 export default function PeerPayRoute() {
-  const { messageBoxUrl, managers, useMessageBox, peerPayClient } = useContext(WalletContext)
-  const wallet = managers?.walletManager ? new WalletClient(managers.walletManager, 'desktop.bsvb.tech') : null
+  const {
+    messageBoxUrl,
+    managers,
+    useMessageBox,
+    peerPayClient,
+    isHostAnointed,
+    anointCurrentHost,
+    anointmentLoading,
+    adminOriginator
+  } = useContext(WalletContext)
+  const wallet = managers?.permissionsManager || null
 
   const [payments, setPayments] = useState<IncomingPayment[]>([])
   const [loading, setLoading] = useState(false)
@@ -499,7 +511,7 @@ export default function PeerPayRoute() {
         includeOutputLockingScripts: true,
         includeOutputs: true,
         limit: 100,
-      })
+      }, adminOriginator)
 
       console.log({ response })
 
@@ -543,6 +555,39 @@ export default function PeerPayRoute() {
             To send and receive payments with other users, enter your Message Box server URL below.
           </Typography>
           <MessageBoxConfig embedded showTitle={false} />
+        </Box>
+      </Container>
+    )
+  }
+
+  // If Message Box is configured but host is not anointed, show anoint prompt
+  if (!isHostAnointed) {
+    return (
+      <Container maxWidth="sm">
+        <Box sx={{ minHeight: '100vh', py: 5 }}>
+          <Typography variant="h5" sx={{ mb: 2 }}>
+            Anoint Host Required
+          </Typography>
+          <Alert severity="warning" sx={{ mb: 3 }}>
+            <Typography variant="body2" sx={{ mb: 2 }}>
+              Your Message Box URL is configured, but you need to anoint the host before you can receive payments.
+              Anointing broadcasts your identity to the overlay network so others can find and send payments to you.
+            </Typography>
+            <Typography variant="body2" sx={{ mb: 2, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+              Host: {messageBoxUrl}
+            </Typography>
+            <Button
+              variant="contained"
+              onClick={anointCurrentHost}
+              disabled={anointmentLoading}
+              startIcon={anointmentLoading ? <CircularProgress size={16} /> : null}
+            >
+              {anointmentLoading ? 'Anointing...' : 'Anoint Host'}
+            </Button>
+          </Alert>
+          <Typography variant="body2" color="textSecondary">
+            You can also manage your Message Box configuration in Settings.
+          </Typography>
         </Box>
       </Container>
     )
