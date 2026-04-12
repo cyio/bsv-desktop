@@ -1,0 +1,108 @@
+name: 'DigiCert Diagnostics'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode client certificate
+        shell: bash
+        run: |
+          echo "${{ secrets.DIGICERT_CLIENT_AUTH_CERT }}" | base64 --decode > /d/sm_client_cert.p12
+
+      - name: Set env vars
+        shell: bash
+        run: |
+          echo "SM_HOST=${{ secrets.DIGICERT_HOST }}" >> "$GITHUB_ENV"
+          echo "SM_API_KEY=${{ secrets.DIGICERT_KEY_LOCKER_API_KEY }}" >> "$GITHUB_ENV"
+          echo "SM_CLIENT_CERT_FILE=D:\\sm_client_cert.p12" >> "$GITHUB_ENV"
+          echo "SM_CLIENT_CERT_PASSWORD=${{ secrets.DIGICERT_CLIENT_AUTH_PASS }}" >> "$GITHUB_ENV"
+
+      - name: Print SM_HOST (unmasked length and protocol)
+        shell: pwsh
+        run: |
+          $h = $env:SM_HOST
+          Write-Host "SM_HOST length: $($h.Length)"
+          Write-Host "SM_HOST starts with https: $($h.StartsWith('https://'))"
+          Write-Host "SM_HOST contains 'eu': $($h.Contains('eu'))"
+          Write-Host "SM_HOST contains 'clientauth': $($h.Contains('clientauth'))"
+
+      - name: Setup Software Trust Manager (full mode)
+        uses: digicert/code-signing-software-trust-action@v1
+        env:
+          SM_HOST: ${{ env.SM_HOST }}
+          SM_API_KEY: ${{ env.SM_API_KEY }}
+          SM_CLIENT_CERT_FILE: ${{ env.SM_CLIENT_CERT_FILE }}
+          SM_CLIENT_CERT_PASSWORD: ${{ env.SM_CLIENT_CERT_PASSWORD }}
+
+      - name: smctl diagnostics
+        shell: pwsh
+        run: |
+          smctl --version
+          Write-Host "`n=== healthcheck ==="
+          smctl healthcheck 2>&1 | Write-Host
+          Write-Host "`n=== keypair list ==="
+          smctl keypair ls 2>&1 | Write-Host
+          Write-Host "`n=== certificate list ==="
+          smctl certificate ls 2>&1 | Write-Host
+
+      - name: "Cert sync method 1: smctl windows certsync"
+        shell: pwsh
+        run: |
+          Write-Host "=== smctl windows certsync ==="
+          smctl windows certsync 2>&1 | Write-Host
+          Write-Host "(exit: $LASTEXITCODE)"
+          Write-Host "`n=== certutil check ==="
+          certutil.exe -csp "DigiCert Software Trust Manager KSP" -key -user 2>&1 | Write-Host
+        continue-on-error: true
+
+      - name: "Cert sync method 2: smksp_cert_sync.exe"
+        shell: pwsh
+        run: |
+          Write-Host "=== Looking for smksp_cert_sync.exe ==="
+          $sync = Get-ChildItem -Path $env:RUNNER_TOOL_CACHE, "$env:LOCALAPPDATA\Temp\smtools-windows-x64" -Filter "smksp_cert_sync.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($sync) {
+            Write-Host "Found: $($sync.FullName)"
+            & $sync.FullName 2>&1 | Write-Host
+            Write-Host "(exit: $LASTEXITCODE)"
+          } else {
+            Write-Host "smksp_cert_sync.exe not found"
+          }
+          Write-Host "`n=== certutil check ==="
+          certutil.exe -csp "DigiCert Software Trust Manager KSP" -key -user 2>&1 | Write-Host
+        continue-on-error: true
+
+      - name: "Cert sync method 3: signtool with KSP directly"
+        shell: pwsh
+        run: |
+          Write-Host "=== Checking Windows cert store ==="
+          certutil.exe -store -user My 2>&1 | Write-Host
+          Write-Host "`n=== List CSPs ==="
+          certutil.exe -csplist 2>&1 | Select-String -Pattern "DigiCert|Software Trust" | Write-Host
+        continue-on-error: true
+
+      - name: Test sign with smctl
+        shell: pwsh
+        run: |
+          Copy-Item "C:\Windows\System32\whoami.exe" "test_sign.exe"
+
+          Write-Host "=== smctl sign --fingerprint ==="
+          smctl sign --fingerprint "${{ secrets.DIGICERT_CODE_SIGNING_SHA1_HASH }}" --input "test_sign.exe" 2>&1 | Write-Host
+          Write-Host "(exit: $LASTEXITCODE)"
+
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+
+          Write-Host "`n=== signtool verify ==="
+          & $signtool verify /pa "test_sign.exe" 2>&1 | Write-Host
+
+          Write-Host "`n=== Try signtool sign directly with KSP ==="
+          Copy-Item "C:\Windows\System32\whoami.exe" "test_signtool.exe"
+          & $signtool sign /tr http://timestamp.digicert.com /td SHA256 /fd SHA256 /sha1 "${{ secrets.DIGICERT_CODE_SIGNING_SHA1_HASH }}" "test_signtool.exe" 2>&1 | Write-Host
+          Write-Host "(exit: $LASTEXITCODE)"

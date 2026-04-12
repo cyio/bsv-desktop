@@ -18,6 +18,7 @@ import { createRequire } from 'module';
 import { fork, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { StorageKnex, KnexMigrations, Services, Monitor, WalletStorageManager, ChaintracksServiceClient } from '@bsv/wallet-toolbox';
+import { patchListCertificates } from './optimized-queries.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -74,7 +75,7 @@ class StorageManager {
     // Create knex instance via CommonJS wrapper
     const knexFactory = getCreateKnex();
     const db = knexFactory({
-      client: 'sqlite3',
+      client: 'better-sqlite3',
       connection: {
         filename: dbPath
       },
@@ -82,7 +83,14 @@ class StorageManager {
       pool: {
         afterCreate: (conn: any, cb: any) => {
           // Enable WAL mode for better concurrent access
-          conn.run('PRAGMA journal_mode = WAL;', cb);
+          conn.pragma('journal_mode = WAL');
+          // Keep up to 64MB in memory before flushing to disk
+          conn.pragma('cache_size = -64000');
+          // Store temp tables/indices in memory instead of disk
+          conn.pragma('temp_store = MEMORY');
+          // Memory-map up to 256MB of the database file for faster reads
+          conn.pragma('mmap_size = 268435456');
+          cb(null, conn);
         }
       }
     });
@@ -107,6 +115,9 @@ class StorageManager {
       feeModel: { model: 'sat/kb', value: 100 },
       commissionSatoshis: 0
     });
+
+    // Replace upstream N+1 listCertificates with batched version
+    patchListCertificates(storage);
 
     // Store references
     this.databases.set(key, db);

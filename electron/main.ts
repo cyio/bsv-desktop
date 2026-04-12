@@ -37,6 +37,27 @@ let prevBundleId: string | null = null;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
+// Linux display server configuration
+// Add command-line switches for better Wayland/X11 compatibility
+if (process.platform === 'linux') {
+  // Try Wayland first, but allow fallback to X11
+  // If WAYLAND_DISPLAY is not set or Wayland fails, Electron will automatically fall back to X11
+  // This helps with various Linux display server configurations
+  
+  // Disable GPU sandbox on Linux for better compatibility with different display servers
+  // This is commonly needed for AppImages and snap packages
+  app.commandLine.appendSwitch('--disable-gpu-sandbox');
+  
+  // Enable features that improve display server compatibility
+  app.commandLine.appendSwitch('--enable-features', 'WaylandWindowDecorations');
+  
+  // If user explicitly sets X11, respect that
+  if (process.env.GDK_BACKEND === 'x11' || process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    app.commandLine.appendSwitch('--ozone-platform', 'x11');
+  }
+  // Otherwise, let Electron auto-detect and use Wayland if available, with X11 fallback
+}
+
 // Get icon path based on platform and environment
 function getIconPath(): string | undefined {
   if (process.platform === 'darwin') {
@@ -116,6 +137,9 @@ ipcMain.handle('is-focused', () => {
   return mainWindow?.isFocused() ?? false;
 });
 
+// The app's own bundle ID — used to avoid capturing ourselves as prevBundleId
+const OWN_BUNDLE_ID = 'com.bsvblockchain.bsvdesktop';
+
 // Request focus - platform-specific implementations
 ipcMain.handle('request-focus', async () => {
   if (!mainWindow) return;
@@ -127,11 +151,15 @@ ipcMain.handle('request-focus', async () => {
     const execPromise = util.promisify(exec);
 
     try {
-      // Capture currently focused app
+      // Capture currently focused app before we steal focus
       const { stdout } = await execPromise(
         'osascript -e \'tell application "System Events" to get the bundle identifier of the first process whose frontmost is true\''
       );
-      prevBundleId = stdout.trim();
+      const captured = stdout.trim();
+      // Don't record ourselves — can happen if focus is called while already active
+      if (captured && captured !== OWN_BUNDLE_ID) {
+        prevBundleId = captured;
+      }
     } catch (error) {
       console.error('Failed to capture previous bundle ID:', error);
     }
@@ -180,15 +208,24 @@ ipcMain.handle('relinquish-focus', async () => {
 
   if (process.platform === 'darwin') {
     // macOS: try to restore previous app
-    if (prevBundleId && prevBundleId !== 'com.apple.finder') {
+    if (prevBundleId && prevBundleId !== 'com.apple.finder' && prevBundleId !== OWN_BUNDLE_ID) {
+      const util = await import('util');
       const { exec } = await import('child_process');
+      const execPromise = util.promisify(exec);
+      const target = prevBundleId;
+      prevBundleId = null;
       try {
-        exec(`osascript -e 'tell application id "${prevBundleId}" to activate'`);
+        // Blur our window first so macOS doesn't fight the activation
+        mainWindow.blur();
+        // Note: 'tell application id "..." to activate' is ignored by macOS 26
+        // when called from a subprocess. 'set frontmost' via System Events works.
+        await execPromise(`osascript -e 'tell application "System Events" to set frontmost of (first process whose bundle identifier is "${target}") to true'`);
       } catch (error) {
         console.error('Failed to restore previous app:', error);
       }
     }
-    prevBundleId = null;
+    // Don't clear prevBundleId on a no-op relinquish — a spurious call (e.g.
+    // from an empty queue on mount) must not wipe a valid stored value.
   } else {
     // Windows/Linux: minimize the window
     mainWindow.minimize();
@@ -274,6 +311,33 @@ ipcMain.handle('save-mnemonic', async (_event, mnemonic: string) => {
     return { success: true, path: filePath };
   } catch (error) {
     console.error('Save mnemonic failed:', error);
+    return { success: false, error: String(error) };
+  }
+});
+
+// Save private key to ~/.bsv-desktop/
+ipcMain.handle('save-private-key', async (_event, privateKey: string) => {
+  try {
+    const homeDir = app.getPath('home');
+    const bsvDir = path.join(homeDir, '.bsv-desktop');
+
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(bsvDir)) {
+      fs.mkdirSync(bsvDir, { recursive: true });
+    }
+
+    const timestamp = Date.now();
+    const fileName = `privatekey${timestamp}.txt`;
+    const filePath = path.join(bsvDir, fileName);
+
+    fs.writeFileSync(filePath, privateKey, 'utf-8');
+
+    // Set file permissions to read-only (0o400 = owner read only)
+    fs.chmodSync(filePath, 0o400);
+
+    return { success: true, path: filePath };
+  } catch (error) {
+    console.error('Save private key failed:', error);
     return { success: false, error: String(error) };
   }
 });
