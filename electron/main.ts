@@ -6,6 +6,7 @@ import fs from 'fs';
 import { startHttpServer, PortInUseError } from './httpServer.js';
 import { buildApplicationMenu } from './appMenu.js';
 import { applyPersistedProxySettings, registerNetworkIpc } from './networkSettings.js';
+import { installSessionFetch } from './sessionFetch.js';
 import { registerWalletPortabilityIpc } from './wallet-portability/ipc.js';
 import type { WalletPortabilityService } from './wallet-portability/service.js';
 import { integrateAppImageDesktopEntry } from './linuxDesktopIntegration.js';
@@ -706,6 +707,11 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('[Startup] Failed to apply persisted proxy settings, continuing startup without them:', error);
   }
+
+  // Must run after the persisted proxy is applied, and before the wallet's
+  // Services are created: @bsv/wallet-toolbox uses global fetch, and this is
+  // what makes its Arcade broadcast/status calls honor the app's proxy.
+  installSessionFetch();
 
   // Must run before the window opens: the compositor resolves the icon when
   // the toplevel is mapped, so a late-installed desktop entry is not picked up
